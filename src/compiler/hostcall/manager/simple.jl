@@ -29,14 +29,14 @@ function acquire_lock_impl(::Type{SimpleAreaManager}, kind::KindConfig, hostcall
     tc = 0
 
     cptr = ptr + (i % count) * stride
-    while (!try_lock(cptr)) &&  tc < 80000
+    while (!try_lock(cptr)) &&  tc < 50000
         nanosleep(UInt32(32))
         i += 1
         tc += 1
         cptr = ptr + (i % count) * stride
     end
 
-    if tc == 80000
+    if tc == 50000
         @cuprintln("Timed out")
     end
 
@@ -46,30 +46,26 @@ function acquire_lock_impl(::Type{SimpleAreaManager}, kind::KindConfig, hostcall
 end
 
 
-function call_host_function(kind::KindConfig, data::SimpleData, hostcall::Int64, ::Val{true})
+function call_host_function(kind::KindConfig, data::SimpleData, hostcall::Int64, ::Val{blocking}) where {blocking}
     cptr = kind.area_ptr + data.index * kind.stride
 
     ptr = reinterpret(Ptr{Int64}, cptr)
     unsafe_store!(ptr + 16, hostcall)
-    unsafe_store!(ptr + 8, HOST_CALL_BLOCKING)
-    threadfence()
+    unsafe_store!(ptr + 8, HOST_CALL)
 
-    while volatile_load(ptr + 8) != HOST_DONE
-        nanosleep(UInt32(16))
-        threadfence()
+    threadfence()
+    notify_host(kind.notification, data.index)
+
+    if blocking
+        while volatile_load(ptr + 8) != HOST_DONE
+            nanosleep(UInt32(16))
+            threadfence()
+        end
+
+        unsafe_store!(ptr + 8, LOADING)
+    else
+        unlock_area(cptr)
     end
-
-    unsafe_store!(ptr + 8, LOADING)
-end
-
-function call_host_function(kind::KindConfig, data::SimpleData, hostcall::Int64, ::Val{false})
-    cptr = kind.area_ptr + data.index * kind.stride
-
-    unsafe_store!(cptr + 16, hostcall)
-    unsafe_store!(cptr + 8, HOST_CALL_NON_BLOCKING)
-    threadfence()
-
-    unlock_area(cptr)
 end
 
 

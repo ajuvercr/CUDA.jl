@@ -59,21 +59,24 @@ Called before executing device kernel.
 This function starts an async task that polls according to the supplied `Poller`
 while the device kernel runs.
 """
-function wait_and_kill_watcher(mod::CuModule, poller::Poller, manager::AreaManager, event::CuEvent, )
-    # empty!(host_refs)
-    reset()
-    area = reset_hostcall_area!(manager, mod)
+function wait_and_kill_watcher(mod::CuModule, poller::Poller, manager::AreaManager, policy::NotificationPolicy, event::CuEvent)
+    (area_ptr, policy_ptr) = reset_hostcall_area!(manager, policy, mod)
+    f = (i) -> handle_hostcall(manager, area_ptr, policy, policy_ptr, i)
 
     t = @async begin
         yield()
+        # This should be gotten from the policy
         count = area_count(manager)
 
         try
-            area !== nothing && launch_poller(poller, manager, event, area, count)
+            # Hoist all these params
+            area_ptr !== nothing && launch_poller(poller, event, 1, count, f)
         catch e
             println("Failed $e")
             stacktrace()
         end
+
+        println(policy)
 
         # println("$(val())")
     end
@@ -97,39 +100,45 @@ function print_stats(values)
     @printf "total %.6fs, mean %.6fs, median %.6fs, var %.6fs, min %.6fs, max %.6fs" total mean median var minv maxv
 end
 
+
 """
 Polls all hostcall areas then sleeps for a certain duration.
 """
-function launch_poller(poller::Poller, manager::AreaManager, e::CuEvent, area::Ptr{Int64}, count::Int64)
+function launch_poller(poller::Poller, e::CuEvent, min::Int64, max::Int64, f::Function)
     hits = 0
     misses = 0
     hit_times = Float64[]
     miss_times = Float64[]
 
-    i = 1
+    i = min
     while true
         s_time = time()
 
-        hostcall = handle_hostcall(manager, area, i)
+        hostcalls = f(i)
 
-        if hostcall != 0
-            hits += 1
-            push!(hit_times, time() - s_time)
-        else
+        if isempty(hostcalls)
             misses += 1
             push!(miss_times, time() - s_time)
+            do_poller(poller, 0)
+        else
+            hits += 1
+            push!(hit_times, time() - s_time)
         end
-        do_poller(poller, hostcall)
+
+        for hostcall in hostcalls
+            do_poller(poller, hostcall)
+        end
+
         i += 1
 
-        if i > count
-            i = 1
+        if i > max
+            i = min
             query(e) && break
         end
     end
 
-    for i in 1:count
-        handle_hostcall(manager, area, i)
+    for i in min:max
+        f(i)
     end
 
     @printf "hits %d, misses %d\n" hits misses

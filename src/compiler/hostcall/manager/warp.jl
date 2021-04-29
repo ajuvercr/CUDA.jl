@@ -74,43 +74,33 @@ function acquire_lock_impl(::Type{WarpAreaManager}, kind::KindConfig, hostcall::
 end
 
 
-function call_host_function(kind::KindConfig, data::WarpData, hostcall::Int64, ::Val{true})
-    if data.laneid == data.leader
-        ptr = reinterpret(Ptr{Int64}, kind.area_ptr + data.index * kind.stride)
-        unsafe_store!(ptr + 16, hostcall)
-        unsafe_store!(ptr + 24, data.mask)
-
-        threadfence()
-        unsafe_store!(ptr+8, HOST_CALL_BLOCKING)
-
-        while volatile_load(ptr + 16) != 0
-            nanosleep(UInt32(16))
-            threadfence()
-        end
-
-        unsafe_store!(ptr + 8, LOADING)
-    end
-
-    sync_warp(data.mask)
-end
-
-
-function call_host_function(kind::KindConfig, data::WarpData, hostcall::Int64, ::Val{false})
-    (index, mask, laneid, leader) = warp_destruct_data(data)
-
+function call_host_function(kind::KindConfig, data::WarpData, hostcall::Int64, ::Val{blocking}) where {blocking}
     if data.laneid == data.leader
         cptr = kind.area_ptr + data.index * kind.stride
-        unsafe_store!(cptr + 16, hostcall)
-        unsafe_store!(cptr + 24, data.mask)
+        ptr = reinterpret(Ptr{Int64}, cptr)
+        unsafe_store!(ptr + 16, hostcall)
+        unsafe_store!(ptr + 24, data.mask)
+        unsafe_store!(ptr+8, HOST_CALL)
 
         threadfence()
-        unsafe_store!(cptr+8, HOST_CALL_NON_BLOCKING)
+        notify_host(kind.notification, data.index)
 
-        unlock_area(cptr)
+        if blocking
+            while volatile_load(ptr + 16) != 0
+                nanosleep(UInt32(16))
+                threadfence()
+            end
+
+            unsafe_store!(ptr + 8, LOADING)
+
+        else
+            unlock_area(cptr)
+        end
     end
 
     sync_warp(data.mask)
 end
+
 
 
 function finish_function(kind::KindConfig, data::WarpData)

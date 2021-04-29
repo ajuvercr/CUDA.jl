@@ -1,4 +1,4 @@
-
+include("hostcall/notification.jl")
 include("hostcall/area_manager.jl")
 include("hostcall/hostref.jl")
 include("hostcall/timer.jl")
@@ -11,28 +11,26 @@ ret_offset() = 16
 Host side function that checks and executes outstanding hostmethods.
 Checking only one index.
 """
-function handle_hostcall(manager::AreaManager, area::Ptr{Int64}, index::Int64)::Int64
-    checked = check_area(manager, area, index)
-    if checked === nothing
-        return 0
-    end
+function handle_hostcall(manager::AreaManager, area::Ptr{Int64}, policy::NotificationPolicy, policy_area::Ptr{Int64}, index::Int64)::Vector{Int64}
+    out = Int64[]
 
-    (hostcall, ptrs) = checked
-    hostcall_type = Val(hostcall)
-    try
-        ## Handle hostcall
-        handle_hostcalls(hostcall_type, manager, ptrs, area, index)
-    catch e
-        println("ERROR ERROR hostcall $(hostcall)")
-        for (exc, bt) in Base.catch_stack()
-            showerror(stdout, exc, bt)
-            println(stdout)
+    for (hostcall, ptrs, area_index) in check_area(manager, area, policy, policy_area, index)
+        push!(out, hostcall)
+        try
+            ## Handle hostcall
+            handle_hostcalls(Val(hostcall), manager, ptrs, area, area_index)
+        catch e
+            println("ERROR ERROR hostcall $(hostcall)")
+            for (exc, bt) in Base.catch_stack()
+                showerror(stdout, exc, bt)
+                println(stdout)
+            end
+
+            finish_area(manager, area, area_index)
         end
-
-        finish_area(manager, area, index)
     end
 
-    return hostcall
+    return out
 end
 
 

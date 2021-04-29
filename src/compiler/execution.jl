@@ -373,8 +373,9 @@ function (kernel::HostKernel)(args...; threads::CuDim=1, blocks::CuDim=1,
     println("Using manager $manager\nPoller $poller")
     event = CuEvent(CUDA.EVENT_DISABLE_TIMING)
 
+    policy_type = SimpleNotificationPolicy
 
-    t = wait_and_kill_watcher(kernel.mod, poller, manager, event)
+    t = wait_and_kill_watcher(kernel.mod, poller, manager, policy_type(area_count(manager)), event)
 
     call(kernel, map(cudaconvert, args)...; threads, blocks, kwargs...)
     CUDA.record(event, stream())
