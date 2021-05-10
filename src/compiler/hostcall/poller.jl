@@ -18,7 +18,9 @@ mutable struct TwoLevelPredictor <: WaitPredictor
     history::UInt8
 end
 TwoLevelPredictor(counter::SaturationCounter) = TwoLevelPredictor([deepcopy(counter) for i in 1:256], 0)
-
+function Base.show(io::IO, ::TwoLevelPredictor)
+    println(io, "TwoLevelPredictor")
+end
 
 struct AlwaysPoller <: Poller
     count :: Int32
@@ -34,6 +36,11 @@ struct VarPoller <: Poller
 end
 VarPoller(wait_durations::Vector{Int64}, ::Type{SaturationCounter}) = VarPoller(SaturationCounter(length(wait_durations)), wait_durations)
 VarPoller(wait_durations::Vector{Int64}, ::Type{TwoLevelPredictor}) = VarPoller(TwoLevelPredictor(SaturationCounter(length(wait_durations))), wait_durations)
+
+function Base.show(io::IO, poller::VarPoller)
+    println("HELLOW SHOWING")
+    print(io, "VarPoller($(poller.wait_durations), $(typeof(poller.branch_predictor)))")
+end
 
 current(predictor::SaturationCounter) = predictor.state
 function correct!(predictor::SaturationCounter, value::Int64)
@@ -53,39 +60,73 @@ end
 
 
 """
-    wait_and_kill_watcher(poller::P, event::CuEvent, ctx::CuContext)
+    wait_and_kill_watcher(mod, poller::Poller, manager::AreaManager, policy::NotificationPolicy, event::CuEvent, ctx::CuContext,  pollers=1)
 
 Called before executing device kernel.
 This function starts an async task that polls according to the supplied `Poller`
 while the device kernel runs.
 """
-function wait_and_kill_watcher(mod::CuModule, poller::Poller, manager::AreaManager, policy::NotificationPolicy, event::CuEvent)
+function wait_and_kill_watcher(mod::CuModule, poller::Poller, manager::AreaManager, policy::NotificationPolicy, event::CuEvent, pollers=1)
     (area_ptr, policy_ptr) = reset_hostcall_area!(manager, policy, mod)
     f = (i) -> handle_hostcall(manager, area_ptr, policy, policy_ptr, i)
 
-    t = @async begin
-        yield()
-        # This should be gotten from the policy
-        count = area_count(manager)
+    poll_intervals = poll_slices(policy, pollers)
+    pollers = length(poll_intervals) # If asked for too many, this is reduced, so update value
+    tasks = Task[]
 
-        try
-            # Hoist all these params
-            area_ptr !== nothing && launch_poller(poller, event, 1, count, f)
-        catch e
-            println("Failed $e")
-            stacktrace()
+    sem = Base.Semaphore(pollers)
+    for i in 1:pollers # Flood semaphore
+        Base.acquire(sem)
+    end
+
+    for (min, max) in poll_intervals
+        t = @async begin
+            Base.release(sem)
+
+            yield()
+            out = ([], [])
+
+            try
+                # Hoist all these params
+                if area_ptr !== nothing
+                    out = launch_poller(poller, event, min, max, f)
+                end
+            catch e
+                println("Failed $e")
+                stacktrace()
+            end
+
+            return out
         end
 
-        println(policy)
-
-        # println("$(val())")
+        push!(tasks, t)
     end
 
-    while !istaskstarted(t)
-        yield()
+    for i in 1:pollers
+        Base.acquire(sem)
     end
 
-    return t
+    return @async begin
+
+        hit_times = Vector{Vector{Float64}}()
+        miss_times = Vector{Vector{Float64}}()
+
+        for i in 1:pollers
+            (hits, misses) = Base.fetch(tasks[i])
+            push!(hit_times, hits)
+            push!(miss_times, misses)
+        end
+
+        hits = [x for y in hit_times for x in y]
+        misses = [x for y in miss_times for x in y]
+        # println(policy)
+
+        # @printf "hits %d, misses %d\n" length(hits) length(misses)
+        # print("Hit  stats: "); print_stats(hits); println()
+        # print("MIss stats: "); print_stats(misses); println()
+
+        return (hits, misses)
+    end
 end
 
 
@@ -105,8 +146,8 @@ end
 Polls all hostcall areas then sleeps for a certain duration.
 """
 function launch_poller(poller::Poller, e::CuEvent, min::Int64, max::Int64, f::Function)
-    hits = 0
-    misses = 0
+    # hits = 0
+    # misses = 0
     hit_times = Float64[]
     miss_times = Float64[]
 
@@ -117,11 +158,11 @@ function launch_poller(poller::Poller, e::CuEvent, min::Int64, max::Int64, f::Fu
         hostcalls = f(i)
 
         if isempty(hostcalls)
-            misses += 1
+            # misses += 1
             push!(miss_times, time() - s_time)
             do_poller(poller, 0)
         else
-            hits += 1
+            # hits += 1
             push!(hit_times, time() - s_time)
         end
 
@@ -129,6 +170,7 @@ function launch_poller(poller::Poller, e::CuEvent, min::Int64, max::Int64, f::Fu
             do_poller(poller, hostcall)
         end
 
+        yield()
         i += 1
 
         if i > max
@@ -141,13 +183,11 @@ function launch_poller(poller::Poller, e::CuEvent, min::Int64, max::Int64, f::Fu
         f(i)
     end
 
-    @printf "hits %d, misses %d\n" hits misses
-    print("Hit  stats: "); print_stats(hit_times); println()
-    print("MIss stats: "); print_stats(miss_times); println()
+    return (hit_times, miss_times)
 end
 
 
-do_poller(poller::AlwaysPoller, hostcall::Int64) = yield()
+do_poller(poller::AlwaysPoller, hostcall::Int64) = ()
 do_poller(poller::ConstantPoller, hostcall::Int64) = hostcall == 0 && (usleep(poller.dur))
 function do_poller(poller::VarPoller, hostcall::Int64)
     sleep = current(poller.branch_predictor)

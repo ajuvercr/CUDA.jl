@@ -163,17 +163,18 @@ Assuring a correct hostcall_area for `manager`.
 Updating the KindConfig buffer with runtime config for `manager`.
 """
 function reset_hostcall_area!(manager::AreaManager, policy::NotificationPolicy, mod::CuModule)::Union{Nothing, Tuple{Ptr{Int64}, Ptr{Int64}}}
-    println(policy)
     hostcall_area = assure_area!(hostcall_areas, mod.ctx, required_size(manager))
     policy_area = assure_area!(policy_areas, mod.ctx, required_size(policy))
     policy_ptr = reinterpret(Ptr{Int64}, policy_area.ptr)
 
     try
+
         # try
         kind = kind_config(manager, hostcall_area, NotificationConfig(policy, policy_area))
         kind_global = CuGlobal{KindConfig}(mod, KINDCONFIG)
         kind_global[] = kind
 
+        # reset hostcall area
         ptr = kind.area_ptr
         for i in 1:area_count(manager)
             unsafe_store!(ptr, UNLOCKED)
@@ -183,9 +184,12 @@ function reset_hostcall_area!(manager::AreaManager, policy::NotificationPolicy, 
         end
 
         reset_policy_area!(policy, policy_ptr)
+        synchronize()
+        # usleep(500)
 
-        return (reinterpret(Ptr{Int64}, kind.area_ptr), policy_ptr)
-    catch
+        return (reinterpret(Ptr{Int64}, kind.area_ptr), policy_area)
+    catch e
+        @error "Something went wrong" exception=(e, catch_backtrace())
         return nothing
     end
 end

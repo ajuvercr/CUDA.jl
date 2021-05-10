@@ -16,6 +16,11 @@ stride(manager::SimpleAreaManager) = align(manager.area_size + 3 * sizeof(Int64)
 kind(::SimpleAreaManager) = 0
 kind(::Type{SimpleAreaManager}) = 0
 
+
+function Base.show(io::IO, manager::SimpleAreaManager)
+    print(io, "SimpleAreaManager($(manager.area_count), $(manager.area_size))")
+end
+
 simple_meta_size() = 3 * sizeof(Int64) # lock, state, hostcall
 get_simple_ptr(kind::KindConfig, data::SimpleData) = kind.area_ptr + data.index * kind.stride + simple_meta_size()
 
@@ -57,9 +62,15 @@ function call_host_function(kind::KindConfig, data::SimpleData, hostcall::Int64,
     notify_host(kind.notification, data.index)
 
     if blocking
-        while volatile_load(ptr + 8) != HOST_DONE
+        tc = 0
+        while volatile_load(ptr + 8) != HOST_DONE &&  tc < 500000
             nanosleep(UInt32(16))
             threadfence()
+            tc += 1
+        end
+
+        if tc == 500000
+            @cuprintln("Timed out simple")
         end
 
         unsafe_store!(ptr + 8, LOADING)
